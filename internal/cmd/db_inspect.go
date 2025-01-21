@@ -98,7 +98,7 @@ func handleInspectQueries(client *turso.Client, database string) error {
 		return err
 	}
 	tbl := table.New("QUERY", "ROWS WRITTEN", "ROWS READ")
-	for _, query := range stats.TopQueries {
+	for _, query := range stats {
 		tbl.AddRow(query.Query, query.RowsWritten, query.RowsRead)
 	}
 	tbl.Print()

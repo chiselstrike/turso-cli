@@ -287,31 +287,30 @@ func (d *DatabasesClient) Update(database string, group bool) error {
 }
 
 type Stats struct {
-	TopQueries []struct {
-		Query       string `json:"query"`
-		RowsRead    int    `json:"rows_read"`
-		RowsWritten int    `json:"rows_written"`
-	} `json:"top_queries,omitempty"`
+	Query       string `json:"query"`
+	RowsRead    int    `json:"rows_read"`
+	RowsWritten int    `json:"rows_written"`
 }
 
-func (d *DatabasesClient) Stats(database string) (Stats, error) {
-	url := d.URL(fmt.Sprintf("/%s/stats", database))
+func (d *DatabasesClient) Stats(database string) ([]Stats, error) {
+	from := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+	url := d.URL(fmt.Sprintf("/%s/usage/queries?from=%v", database, from))
 	r, err := d.client.Get(url, nil)
 	if err != nil {
-		return Stats{}, fmt.Errorf("failed to update database: %w", err)
+		return nil, fmt.Errorf("failed to update database: %w", err)
 	}
 	defer r.Body.Close()
 
 	org := d.client.Org
 	if isNotMemberErr(r.StatusCode, org) {
-		return Stats{}, notMemberErr(org)
+		return nil, notMemberErr(org)
 	}
 
 	if r.StatusCode != http.StatusOK {
-		return Stats{}, fmt.Errorf("failed to get stats for database: %w", parseResponseError(r))
+		return nil, fmt.Errorf("failed to get stats for database: %w", parseResponseError(r))
 	}
 
-	return unmarshal[Stats](r)
+	return unmarshal[[]Stats](r)
 }
 
 type Body struct {
