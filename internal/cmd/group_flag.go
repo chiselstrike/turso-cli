@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/Clever/csvlint"
@@ -62,7 +64,7 @@ func parseTimestampFlag() (*time.Time, error) {
 	return &timestamp, nil
 }
 
-func parseDBSeedFlags(client *turso.Client) (*turso.DBSeed, error) {
+func parseDBSeedFlags(client *turso.Client, isAWS bool) (*turso.DBSeed, error) {
 	if countFlags(fromDBFlag, fromDumpFlag, fromFileFlag, fromDumpURLFlag, fromCSVFlag) > 1 {
 		return nil, fmt.Errorf("only one of --from prefixed flags can be used at a time")
 	}
@@ -83,7 +85,7 @@ func parseDBSeedFlags(client *turso.Client) (*turso.DBSeed, error) {
 	}
 
 	if fromFileFlag != "" {
-		return handleDBFile(client, fromFileFlag)
+		return handleDBFile(client, fromFileFlag, isAWS)
 	}
 
 	if fromDumpFlag != "" {
@@ -187,12 +189,84 @@ func countFlags(flags ...string) (count int) {
 	return
 }
 
-func handleDBFile(client *turso.Client, file string) (*turso.DBSeed, error) {
+const MaxAWSDBSizeBytes = 1024 * 1024 * 1024 * 20 // 20 GB
+func sqliteFileIntegrityChecks(file string) error {
+	log.Printf("Running integrity checks on database file %s", file)
+	log.Printf("Checking file size...")
+	fileInfo, err := os.Stat(file)
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	if fileInfo.Size() > MaxAWSDBSizeBytes {
+		return fmt.Errorf("database file size exceeds maximum allowed size of 20 GB")
+	}
+
+	log.Printf("Checking database settings...")
+	output, err := exec.Command("sqlite3", file, ".mode line",
+		"select journal_mode as j, page_size as p, auto_vacuum as a, encoding as e from pragma_journal_mode, pragma_page_size, pragma_auto_vacuum, pragma_encoding;").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to check database settings: %w", err)
+	}
+
+	settings := string(output)
+	if !strings.Contains(settings, "j = wal") {
+		log.Printf("Database is not in WAL mode, setting to WAL...")
+		// set to WAL
+		_, err = exec.Command("sqlite3", file, "PRAGMA journal_mode = WAL;").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("database is not in WAL mode, and we failed to set it: %w", err)
+		}
+		// run truncating checkpoint
+		log.Printf("Running checkpoint...")
+		_, err = exec.Command("sqlite3", file, "pragma wal_checkpoint(TRUNCATE);").CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to run truncating checkpoint after setting journal mode to WAL: %w", err)
+		}
+	}
+	if !strings.Contains(settings, "p = 4096") {
+		return fmt.Errorf("database must use 4KB page size. you can set it with 'sqlite3 yourdb.db 'PRAGMA page_size = 4096'")
+	}
+	if !strings.Contains(settings, "a = 0") {
+		return fmt.Errorf("database must have autovacuum disabled. you can set it with 'sqlite3 yourdb.db 'PRAGMA auto_vacuum = 0'")
+	}
+	if !strings.Contains(settings, "e = UTF-8") {
+		return fmt.Errorf("database must use UTF-8 encoding. you can set it with 'sqlite3 yourdb.db 'PRAGMA encoding = 'UTF-8'	")
+	}
+
+	// run quick_check
+	log.Printf("Running integrity check...")
+	_, err = exec.Command("sqlite3", file, "pragma quick_check;").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("integrity check on database failed: %w", err)
+	}
+
+	return nil
+}
+
+func handleDBFileAWS(file string) (*turso.DBSeed, error) {
+	if err := sqliteFileIntegrityChecks(file); err != nil {
+		return nil, err
+	}
+
+	seed := &turso.DBSeed{
+		Type:     "database_upload",
+		Filepath: file,
+	}
+
+	return seed, nil
+}
+
+func handleDBFile(client *turso.Client, file string, isAWS bool) (*turso.DBSeed, error) {
 	if err := checkFileExists(file); err != nil {
 		return nil, err
 	}
 	if err := checkSQLiteAvailable(); err != nil {
 		return nil, err
+	}
+
+	if isAWS {
+		return handleDBFileAWS(file)
 	}
 
 	if err := checkSQLiteFile(file); err != nil {
@@ -292,7 +366,7 @@ func handleCSVFile(client *turso.Client, file, csvTableName string, separator ru
 		return nil, err
 	}
 
-	seed, err := handleDBFile(client, tempDB.Name())
+	seed, err := handleDBFile(client, tempDB.Name(), false)
 	if err != nil {
 		return nil, err
 	}

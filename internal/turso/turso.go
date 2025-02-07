@@ -63,7 +63,10 @@ func New(base *url.URL, token string, cliVersion string, org string) *Client {
 	return c
 }
 
-func (t *Client) newRequest(method, urlPath string, body io.Reader) (*http.Request, error) {
+func (t *Client) newRequest(method, urlPath string, body io.Reader, contentType string) (*http.Request, error) {
+	if contentType == "" {
+		return nil, fmt.Errorf("content type is required")
+	}
 	url, err := url.Parse(t.baseUrl.String())
 	if err != nil {
 		return nil, err
@@ -85,12 +88,12 @@ func (t *Client) newRequest(method, urlPath string, body io.Reader) (*http.Reque
 		parsedCliVersion = t.cliVersion[1:]
 	}
 	req.Header.Add("User-Agent", fmt.Sprintf("turso-cli/%s (%s/%s)", parsedCliVersion, runtime.GOOS, runtime.GOARCH))
-	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Content-Type", contentType)
 	return req, nil
 }
 
-func (t *Client) do(method, path string, body io.Reader) (*http.Response, error) {
-	req, err := t.newRequest(method, path, body)
+func (t *Client) do(method, path string, body io.Reader, contentType string) (*http.Response, error) {
+	req, err := t.newRequest(method, path, body, contentType)
 	var reqDump string
 	if flags.Debug() {
 		reqDump = dumpRequest(req)
@@ -134,19 +137,23 @@ func dumpResponse(req *http.Response) string {
 }
 
 func (t *Client) Get(path string, body io.Reader) (*http.Response, error) {
-	return t.do("GET", path, body)
+	return t.do("GET", path, body, "application/json")
 }
 
 func (t *Client) Post(path string, body io.Reader) (*http.Response, error) {
-	return t.do("POST", path, body)
+	return t.do("POST", path, body, "application/json")
+}
+
+func (t *Client) PostBinary(path string, body io.Reader) (*http.Response, error) {
+	return t.do("POST", path, body, "application/octet-stream")
 }
 
 func (t *Client) Patch(path string, body io.Reader) (*http.Response, error) {
-	return t.do("PATCH", path, body)
+	return t.do("PATCH", path, body, "application/json")
 }
 
 func (t *Client) Put(path string, body io.Reader) (*http.Response, error) {
-	return t.do("PUT", path, body)
+	return t.do("PUT", path, body, "application/json")
 }
 
 func (t *Client) Upload(path string, fileData *os.File) (*http.Response, error) {
@@ -164,11 +171,10 @@ func (t *Client) Upload(path string, fileData *os.File) (*http.Response, error) 
 		}
 		bodyWriter.CloseWithError(writer.Close())
 	}()
-	req, err := t.newRequest("POST", path, body)
+	req, err := t.newRequest("POST", path, body, writer.FormDataContentType())
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -177,5 +183,5 @@ func (t *Client) Upload(path string, fileData *os.File) (*http.Response, error) 
 }
 
 func (t *Client) Delete(path string, body io.Reader) (*http.Response, error) {
-	return t.do("DELETE", path, body)
+	return t.do("DELETE", path, body, "application/json")
 }

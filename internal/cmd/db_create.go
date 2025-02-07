@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/athoscouto/codename"
@@ -62,7 +63,7 @@ var createCmd = &cobra.Command{
 			return err
 		}
 
-		group, err := groupFromFlag(client)
+		group, isDefault, err := groupFromFlag(client)
 		if err != nil {
 			return err
 		}
@@ -72,7 +73,8 @@ var createCmd = &cobra.Command{
 			return err
 		}
 
-		seed, err := parseDBSeedFlags(client)
+		isAWS := strings.HasPrefix(group.Primary, "aws-")
+		seed, err := parseDBSeedFlags(client, isAWS)
 		if err != nil {
 			return err
 		}
@@ -82,21 +84,26 @@ var createCmd = &cobra.Command{
 			version = "canary"
 		}
 
-		if err := ensureGroup(client, group, location, version); err != nil {
+		groupName := group.Name
+		if isDefault {
+			groupName = "default"
+		}
+
+		if err := ensureGroup(client, groupName, location, version); err != nil {
 			return err
 		}
 
 		start := time.Now()
-		spinner := prompt.Spinner(fmt.Sprintf("Creating database %s in group %s...", internal.Emph(name), internal.Emph(group)))
+		spinner := prompt.Spinner(fmt.Sprintf("Creating database %s in group %s...", internal.Emph(name), internal.Emph(groupName)))
 		defer spinner.Stop()
 
-		if _, err = client.Databases.Create(name, location, "", "", group, schemaFlag, typeFlag == "schema", seed, sizeLimitFlag); err != nil {
+		if _, err = client.Databases.Create(name, location, "", "", groupName, schemaFlag, typeFlag == "schema", seed, sizeLimitFlag, spinner); err != nil {
 			return fmt.Errorf("could not create database %s: %w", name, err)
 		}
 
 		spinner.Stop()
 		elapsed := time.Since(start)
-		fmt.Printf("Created database %s at group %s in %s.\n\n", internal.Emph(name), internal.Emph(group), elapsed.Round(time.Millisecond).String())
+		fmt.Printf("Created database %s at group %s in %s.\n\n", internal.Emph(name), internal.Emph(groupName), elapsed.Round(time.Millisecond).String())
 
 		fmt.Printf("Start an interactive SQL shell with:\n\n")
 		fmt.Printf("   %s\n\n", internal.Emph("turso db shell "+name))
@@ -131,26 +138,32 @@ func getDatabaseName(args []string) (string, error) {
 	return codename.Generate(rng, 0), nil
 }
 
-func groupFromFlag(client *turso.Client) (string, error) {
+// Returns (group, isDefault, error)
+func groupFromFlag(client *turso.Client) (turso.Group, bool, error) {
 	groups, err := getGroups(client)
 	if err != nil {
-		return "", err
+		return turso.Group{}, false, err
 	}
 
 	if groupFlag != "" {
 		if !groupExists(groups, groupFlag) {
-			return "", fmt.Errorf("group %s does not exist", groupFlag)
+			return turso.Group{}, false, fmt.Errorf("group %s does not exist", groupFlag)
 		}
-		return groupFlag, nil
+		for _, group := range groups {
+			if group.Name == groupFlag {
+				return group, false, nil
+			}
+		}
+		return turso.Group{}, false, fmt.Errorf("group %s does not exist", groupFlag)
 	}
 
 	switch {
 	case len(groups) == 0:
-		return "default", nil
+		return turso.Group{Name: "default"}, true, nil
 	case len(groups) == 1:
-		return groups[0].Name, nil
+		return groups[0], true, nil
 	default:
-		return "", fmt.Errorf("you have more than one database group. Please specify one with %s", internal.Emph("--group"))
+		return turso.Group{}, false, fmt.Errorf("you have more than one database group. Please specify one with %s", internal.Emph("--group"))
 
 	}
 }
