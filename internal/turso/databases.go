@@ -175,7 +175,7 @@ func (d *DatabasesClient) Create(name, location, image, extensions, group string
 	}
 
 	if is_aws_db_upload {
-		if data, err = d.UploadDatabaseAWS(data, group, upload_filepath, spinner); err != nil {
+		if _, err = d.UploadDatabaseAWS(data, group, upload_filepath, spinner); err != nil {
 			// Clean up the database if the upload fails
 			if deleteErr := d.Delete(data.Database.Name); deleteErr != nil {
 				fmt.Printf("%v", deleteErr)
