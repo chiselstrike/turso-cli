@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tursodatabase/turso-cli/internal"
+	"github.com/tursodatabase/turso-cli/internal/prompt"
 )
 
 type Database struct {
@@ -106,6 +107,9 @@ type DBSeed struct {
 	Name      string     `json:"value,omitempty"`
 	URL       string     `json:"url,omitempty"`
 	Timestamp *time.Time `json:"timestamp,omitempty"`
+	// This is only used locally when uploading a database file and
+	// never passed to the control plane as JSON.
+	Filepath string `json:"filepath,omitempty"`
 }
 
 type CreateDatabaseBody struct {
@@ -120,8 +124,26 @@ type CreateDatabaseBody struct {
 	SizeLimit  string  `json:"size_limit,omitempty"`
 }
 
-func (d *DatabasesClient) Create(name, location, image, extensions, group string, schema string, isSchema bool, seed *DBSeed, sizeLimit string) (*CreateDatabaseResponse, error) {
-	params := CreateDatabaseBody{name, location, image, extensions, group, seed, schema, isSchema, sizeLimit}
+func (d *DatabasesClient) Create(name, location, image, extensions, group string, schema string, isSchema bool, seed *DBSeed, sizeLimit string, spinner *prompt.SpinnerT) (*CreateDatabaseResponse, error) {
+	is_aws_db_upload := seed != nil && seed.Type == "database_upload" && seed.Filepath != ""
+	var upload_filepath string
+	var params CreateDatabaseBody
+	if is_aws_db_upload {
+		upload_filepath = seed.Filepath
+		// Clear the unused seed parameters, only Type=database_upload is used.
+		seed.Filepath = ""
+		seed.Name = ""
+		seed.URL = ""
+		seed.Timestamp = nil
+		params = CreateDatabaseBody{
+			Name:     name,
+			Location: location,
+			Group:    group,
+			Seed:     seed,
+		}
+	} else {
+		params = CreateDatabaseBody{name, location, image, extensions, group, seed, schema, isSchema, sizeLimit}
+	}
 
 	body, err := marshal(params)
 	if err != nil {
@@ -152,7 +174,73 @@ func (d *DatabasesClient) Create(name, location, image, extensions, group string
 		return nil, fmt.Errorf("failed to deserialize response: %w", err)
 	}
 
+	if is_aws_db_upload {
+		if _, err = d.UploadDatabaseAWS(data, group, upload_filepath, spinner); err != nil {
+			// Clean up the database if the upload fails
+			if deleteErr := d.Delete(data.Database.Name); deleteErr != nil {
+				fmt.Printf("%v", deleteErr)
+			}
+			return nil, err
+		}
+
+		return data, nil
+	}
+
 	return data, nil
+}
+
+// UploadDatabaseAWS creates a database from an uploaded database file
+//  1. It creates a database on the control plane as normal, but passes a special seed type
+//     which instructs the control plane create the db as 'draft',
+//     i.e. in a mode where it is not yet available for use.
+//     This call happens in DatabasesClient.Create() above, after which it calls this function.
+//  2. This function creates a DB token for the newly-created DB, and then calls turso-server to upload the database file.
+//     turso-server will perform validations on the file and 'activate' the db if everything is ok.
+func (d *DatabasesClient) UploadDatabaseAWS(resp *CreateDatabaseResponse, group string, upload_filepath string, spinner *prompt.SpinnerT) (*CreateDatabaseResponse, error) {
+	// Create a short-lived DB token for the newly created database to facilitate the upload
+	token, err := d.Token(resp.Database.Name, "1h", false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("could not create database token: %w", err)
+	}
+
+	hostname := resp.Database.Hostname
+	tursoServerClient, err := NewTursoServerClient(hostname, token, d.client.cliVersion, d.client.Org)
+	if err != nil {
+		return nil, fmt.Errorf("could not create Turso server client: %w", err)
+	}
+
+	// Upload the database file
+	spinner.Text(fmt.Sprintf("Uploading database %s in group %s, this may take a while...", internal.Emph(resp.Database.Name), internal.Emph(group)))
+	err = tursoServerClient.UploadFile(upload_filepath, func(progressPct int, uploadedBytes int64, totalBytes int64, elapsedTime time.Duration, done bool) {
+		totalSeconds := int(elapsedTime.Seconds())
+		minutes := totalSeconds / 60
+		seconds := totalSeconds % 60
+		secondsStr := "seconds"
+		if seconds == 1 {
+			secondsStr = "second"
+		}
+		minutesStr := "minutes"
+		if minutes == 1 {
+			minutesStr = "minute"
+		}
+		var elapsedTimeStr string
+		if minutes > 0 {
+			elapsedTimeStr = fmt.Sprintf("%d %s %d %s", minutes, minutesStr, seconds, secondsStr)
+		} else {
+			elapsedTimeStr = fmt.Sprintf("%d %s", seconds, secondsStr)
+		}
+		if done {
+			spinner.Text(fmt.Sprintf("Uploaded database %s in group %s (%d bytes) - we are now verifying your database on the server... (took %s)", internal.Emph(resp.Database.Name), internal.Emph(group), totalBytes, elapsedTimeStr))
+		} else {
+			spinner.Text(fmt.Sprintf("Uploading database %s in group %s, %d%% complete (%d/%d bytes uploaded) (elapsed %s)", internal.Emph(resp.Database.Name), internal.Emph(group), progressPct, uploadedBytes, totalBytes, elapsedTimeStr))
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("could not upload database file: %w", err)
+	}
+
+	// Return the original database creation response
+	return resp, nil
 }
 
 func (d *DatabasesClient) Seed(name string, dbFile *os.File) error {

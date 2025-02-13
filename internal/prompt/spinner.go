@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-type spinner struct {
+type SpinnerT struct {
 	spinner   spn.Model
 	prefix    string
 	suffix    string
@@ -17,17 +17,17 @@ type spinner struct {
 	done      chan bool
 }
 
-func newSpinner(prefix, suffix string) *spinner {
+func newSpinner(prefix, suffix string) *SpinnerT {
 	s := spn.New()
 	s.Spinner = spn.Dot
-	return &spinner{spinner: s, prefix: prefix, suffix: suffix}
+	return &SpinnerT{spinner: s, prefix: prefix, suffix: suffix}
 }
 
-func (m *spinner) Init() tea.Cmd {
+func (m *SpinnerT) Init() tea.Cmd {
 	return m.spinner.Tick
 }
 
-func (m *spinner) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *SpinnerT) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.quitting {
 		return m, tea.Quit
 	}
@@ -48,25 +48,25 @@ func (m *spinner) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *spinner) View() string {
+func (m *SpinnerT) View() string {
 	if m.quitting {
 		return ""
 	}
 	return fmt.Sprintf("%s%s %s", m.prefix, m.spinner.View(), m.suffix)
 }
 
-func (m *spinner) Stop() {
+func (m *SpinnerT) Stop() {
 	m.quitting = true
 	if m.done != nil {
 		<-m.done
 	}
 }
 
-func (m *spinner) Text(t string) {
+func (m *SpinnerT) Text(t string) {
 	m.suffix = t
 }
 
-func (m *spinner) Start() {
+func (m *SpinnerT) Start() {
 	if !isInteractive {
 		fmt.Println(m.View())
 		return
@@ -85,12 +85,12 @@ func (m *spinner) Start() {
 	}()
 }
 
-func StoppedSpinner(text string) *spinner {
+func StoppedSpinner(text string) *SpinnerT {
 	spinner := newSpinner("", text)
 	return spinner
 }
 
-func Spinner(text string) *spinner {
+func Spinner(text string) *SpinnerT {
 	spinner := StoppedSpinner(text)
 	spinner.Start()
 	return spinner
